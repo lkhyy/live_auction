@@ -1,0 +1,18 @@
+config:
+  target: "http://localhost:3000"
+  phases:
+    - duration: 60
+      arrivalRate: 25
+      name: "Ramp WS connections"
+  engines:
+    socketio-v3: {}
+  processor: "./artillery-processor.js"
+
+scenarios:
+  - name: "Join auction room and receive timer sync"
+    engine: socketio-v3
+    flow:
+      - emit:
+          channel: "join_auction"
+          data: "{{ $processEnvironment.AUCTION_ID }}"
+      - think: 60
