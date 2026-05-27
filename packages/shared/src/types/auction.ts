@@ -7,7 +7,12 @@ export type AuctionStatus =
   | 'CANCELLED'
   | 'FAILED';
 
-export type SettleReason = 'TIME_UP' | 'CAP_PRICE' | 'HOST_CANCEL' | 'MANUAL';
+export type SettleReason =
+  | 'TIME_UP'
+  | 'CAP_PRICE'
+  | 'HOST_CANCEL'
+  | 'MANUAL'
+  | 'RESERVE_NOT_MET';
 
 export interface LeaderboardEntry {
   userId: string;

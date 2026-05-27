@@ -1,12 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, List, Tag, Toast } from 'antd-mobile';
-import { meApi } from '../../lib/api';
+import { QueryErrorCard } from '../../components/QueryErrorCard';
+import { isUnauthorizedError, meApi } from '../../lib/api';
+import { useAuthStore } from '../../stores/authStore';
 
 export default function MobileOrdersPage() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({
+  const token = useAuthStore((s) => s.token);
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['my-orders'],
     queryFn: () => meApi.orders(),
+    enabled: !!token,
+    retry: (count, err) => !isUnauthorizedError(err) && count < 2,
   });
 
   const payMutation = useMutation({
@@ -23,7 +28,8 @@ export default function MobileOrdersPage() {
   return (
     <div>
       <h2 style={{ margin: '0 0 12px' }}>我的订单</h2>
-      {isLoading && <Card>加载中...</Card>}
+      {isError && <QueryErrorCard error={error} onRetry={() => void refetch()} />}
+      {isLoading && !isError && <Card>加载中...</Card>}
       <List>
         {orders.map((o) => {
           const auction = o.auction as Record<string, unknown>;
@@ -57,7 +63,7 @@ export default function MobileOrdersPage() {
           );
         })}
       </List>
-      {!isLoading && orders.length === 0 && (
+      {!isLoading && !isError && orders.length === 0 && (
         <Card style={{ textAlign: 'center', color: '#999' }}>暂无订单</Card>
       )}
     </div>

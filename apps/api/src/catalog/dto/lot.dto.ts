@@ -1,4 +1,4 @@
-import { IsOptional, IsString, IsUrl, MinLength } from 'class-validator';
+import { IsOptional, IsString, IsUrl, MinLength, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreateLotDto {
@@ -13,7 +13,7 @@ export class CreateLotDto {
   description?: string;
 
   @ApiPropertyOptional()
-  @IsOptional()
+  @ValidateIf((_, v) => v != null && v !== '')
   @IsUrl()
   imageUrl?: string;
 
@@ -35,7 +35,7 @@ export class UpdateLotDto {
   description?: string;
 
   @ApiPropertyOptional()
-  @IsOptional()
+  @ValidateIf((_, v) => v != null && v !== '')
   @IsUrl()
   imageUrl?: string;
 

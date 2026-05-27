@@ -4,4 +4,8 @@ export * from './constants/events';
 export * from './constants/errors';
 export * from './types/auction';
 export * from './types/ws-events';
+export * from './types/ws-join';
 export * from './types/showcase';
+export * from './types/participation';
+export * from './types/me';
+export * from './utils/auction-rules';

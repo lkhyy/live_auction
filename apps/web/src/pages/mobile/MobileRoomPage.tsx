@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { NavBar, Toast } from 'antd-mobile';
+import { Card, NavBar, Toast } from 'antd-mobile';
 import type { LiveRoomShowcase, ShowcaseItem } from '@live-auction/shared';
 import LiveVideoLayer from '../../components/LiveVideoLayer';
 import HostScriptTicker from '../../components/HostScriptTicker';
@@ -14,7 +14,11 @@ export default function MobileRoomPage() {
   const [showcase, setShowcase] = useState<LiveRoomShowcase | null>(null);
   const [showcaseOpen, setShowcaseOpen] = useState(true);
 
-  const { data: initial } = useQuery({
+  const {
+    data: initial,
+    isLoading,
+    isError,
+  } = useQuery({
     queryKey: ['showcase', roomId],
     queryFn: () => liveRoomsApi.showcase(roomId!),
     enabled: !!roomId,
@@ -30,12 +34,8 @@ export default function MobileRoomPage() {
   useLiveRoomSocket(roomId, onShowcase);
 
   const handleItemAction = (item: ShowcaseItem) => {
-    if (item.buttonAction === 'BID') {
+    if (item.buttonAction === 'BID' || item.buttonAction === 'VIEW') {
       navigate(`/m/live/${item.auctionId}?roomId=${roomId}`);
-      return;
-    }
-    if (item.buttonAction === 'VIEW') {
-      navigate(`/m/auctions/${item.auctionId}`);
       return;
     }
     if (item.buttonAction === 'CLOSING') {
@@ -55,6 +55,16 @@ export default function MobileRoomPage() {
 
       <LiveVideoLayer />
       <HostScriptTicker running={displayShowcase?.roomStatus === 'LIVE'} />
+
+      {isError && (
+        <Card style={{ margin: 12, color: '#cf1322' }}>
+          无法加载直播间，请确认后端已启动（npm run dev:api）。若刚重置过数据库，请执行 npm run
+          storage:reset 后刷新。
+        </Card>
+      )}
+      {isLoading && !displayShowcase && (
+        <Card style={{ margin: 12, textAlign: 'center' }}>加载中…</Card>
+      )}
 
       <div
         style={{

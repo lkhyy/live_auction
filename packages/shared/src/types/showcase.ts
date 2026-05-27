@@ -4,7 +4,8 @@ export type ShowcaseDisplayStatus =
   | 'UPCOMING'  // 即将开拍
   | 'FAILED'    // 竞拍未成交
   | 'SOLD'      // 竞拍结束-成交
-  | 'CLOSING';  // 截拍中
+  | 'CLOSING'   // 截拍中
+  | 'CANCELLED'; // 主播取消
 
 export interface ShowcaseItem {
   auctionId: string;
@@ -16,6 +17,10 @@ export interface ShowcaseItem {
   priceLabel: string;
   price: number;
   startPrice: number;
+  minIncrement: number;
+  capPrice?: number | null;
+  /** 最低成交价，仅管理端 showcase 返回 */
+  reservePrice?: number | null;
   endAt?: number;
   remainingMs?: number;
   isExplaining: boolean;
@@ -23,6 +28,10 @@ export interface ShowcaseItem {
   buttonEnabled: boolean;
   buttonAction: 'BID' | 'VIEW' | 'NONE' | 'CLOSING';
   bidCount: number;
+  /** 成交后关联订单 ID，仅管理端 showcase 返回 */
+  orderId?: string | null;
+  /** 价格异常预警已触发，仅管理端 showcase 返回 */
+  priceAlertActive?: boolean;
 }
 
 export interface LiveRoomShowcase {

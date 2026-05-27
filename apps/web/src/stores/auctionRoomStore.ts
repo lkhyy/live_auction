@@ -69,8 +69,16 @@ export const useAuctionRoomStore = create<AuctionRoomState>((set, get) => ({
     if (payload.seq < get().lastSeq) return;
     const prev = get().snapshot;
     if (!prev) return;
+    // 平滑校准时钟，避免每秒 timer_sync 硬重置 clockOffset 导致倒计时「跳跃」
+    const targetOffset = payload.serverNow - Date.now();
+    const prevOffset = get().clockOffset;
+    const drift = Math.abs(targetOffset - prevOffset);
+    const clockOffset =
+      drift > 500
+        ? prevOffset + (targetOffset - prevOffset) * 0.25
+        : prevOffset;
     set({
-      clockOffset: payload.serverNow - Date.now(),
+      clockOffset,
       snapshot: {
         ...prev,
         endAt: payload.endAt,

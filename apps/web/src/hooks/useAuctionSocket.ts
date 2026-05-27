@@ -1,13 +1,12 @@
 import { useEffect, useRef } from 'react';
-import { io, Socket } from 'socket.io-client';
-import { WS_EVENTS } from '@live-auction/shared';
+import type { Socket } from 'socket.io-client';
+import { WS_EVENTS, resolveViewerKey } from '@live-auction/shared';
 import type { AuctionSnapshot, BidUpdatePayload, TimerSyncPayload } from '@live-auction/shared';
 import { message } from 'antd';
 import { Toast } from 'antd-mobile';
 import { auctionsApi } from '../lib/api';
+import { acquireAuctionSocket, releaseAuctionSocket } from '../lib/realtimeSocket';
 import { useAuctionRoomStore } from '../stores/auctionRoomStore';
-
-const WS_URL = import.meta.env.VITE_WS_URL ?? 'http://localhost:3000';
 
 function isMobilePath() {
   return window.location.pathname.startsWith('/m');
@@ -15,6 +14,8 @@ function isMobilePath() {
 
 export function useAuctionSocket(auctionId: string | undefined, userId?: string) {
   const socketRef = useRef<Socket | null>(null);
+  const userIdRef = useRef(userId);
+  userIdRef.current = userId;
   const {
     setSnapshot,
     applyBidUpdate,
@@ -38,13 +39,7 @@ export function useAuctionSocket(auctionId: string | undefined, userId?: string)
 
     void loadSnapshot();
 
-    const socket = io(WS_URL, {
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 30000,
-    });
+    const socket = acquireAuctionSocket(auctionId);
     socketRef.current = socket;
 
     const notify = (title: string, body: string) => {
@@ -58,25 +53,22 @@ export function useAuctionSocket(auctionId: string | undefined, userId?: string)
       }
     };
 
-    socket.on('connect', () => {
+    const joinAuction = () => {
       setConnectionStatus('connected');
-      socket.emit(WS_EVENTS.JOIN_AUCTION, auctionId);
+      socket.emit(WS_EVENTS.JOIN_AUCTION, {
+        auctionId,
+        viewerKey: resolveViewerKey(userIdRef.current, socket.id),
+      });
       void loadSnapshot();
-    });
+    };
 
-    socket.on('disconnect', () => setConnectionStatus('disconnected'));
-    socket.io.on('reconnect_attempt', () => setConnectionStatus('reconnecting'));
-    socket.io.on('reconnect', () => {
-      setConnectionStatus('connected');
-      socket.emit(WS_EVENTS.JOIN_AUCTION, auctionId);
-      void loadSnapshot();
-    });
+    const onDisconnect = () => setConnectionStatus('disconnected');
+    const onReconnectAttempt = () => setConnectionStatus('reconnecting');
+    const onReconnect = () => joinAuction();
 
-    socket.on(WS_EVENTS.SNAPSHOT, (data: AuctionSnapshot) => {
-      setSnapshot(data);
-    });
+    const onSnapshot = (data: AuctionSnapshot) => setSnapshot(data);
 
-    socket.on(WS_EVENTS.BID_UPDATE, (data: BidUpdatePayload) => {
+    const onBidUpdate = (data: BidUpdatePayload) => {
       applyBidUpdate({
         seq: data.seq,
         version: data.version,
@@ -87,61 +79,86 @@ export function useAuctionSocket(auctionId: string | undefined, userId?: string)
         serverNow: data.serverNow,
         leaderboard: data.leaderboard,
       });
-    });
+    };
 
-    socket.on(WS_EVENTS.TIMER_SYNC, (data: TimerSyncPayload & { participantCount?: number }) => {
+    const onTimerSync = (data: TimerSyncPayload & { participantCount?: number }) => {
       applyTimerSync(data);
-      const prev = useAuctionRoomStore.getState().snapshot;
-      if (prev && data.participantCount != null) {
-        useAuctionRoomStore.setState({
-          snapshot: { ...useAuctionRoomStore.getState().snapshot!, participantCount: data.participantCount },
-        });
-      }
-    });
+    };
 
-    socket.on(WS_EVENTS.TIMER_EXTENDED, (data: { message?: string; endAt: number }) => {
+    const onTimerExtended = (data: { message?: string; endAt: number; seq?: number }) => {
       notify('竞拍延时', data.message ?? '倒计时已延长');
-      applyTimerSync({
-        serverNow: Date.now(),
-        endAt: data.endAt,
-        version: useAuctionRoomStore.getState().snapshot?.version ?? 0,
-        seq: useAuctionRoomStore.getState().lastSeq,
+      const prev = useAuctionRoomStore.getState().snapshot;
+      if (!prev) return;
+      useAuctionRoomStore.setState({
+        snapshot: {
+          ...prev,
+          endAt: data.endAt,
+          seq: data.seq ?? prev.seq,
+        },
       });
-    });
+    };
 
-    socket.on(
-      WS_EVENTS.OUTBID,
-      (data: { userId: string; message?: string; newPrice: number }) => {
-        if (userId && data.userId === userId) {
-          notify('被超越', data.message ?? `当前价 ¥${data.newPrice}`);
-        }
-      },
-    );
+    const onOutbid = (data: { userId: string; message?: string; newPrice: number }) => {
+      if (userIdRef.current && data.userId === userIdRef.current) {
+        notify('被超越', data.message ?? `当前价 ¥${data.newPrice}`);
+      }
+    };
 
-    socket.on(WS_EVENTS.AUCTION_ENDED, (data: { snapshot: AuctionSnapshot; finalPrice?: number }) => {
+    const onAuctionEnded = (data: { snapshot: AuctionSnapshot; finalPrice?: number }) => {
       setSnapshot(data.snapshot);
       notify('竞拍结束', `成交价 ¥${data.snapshot.currentPrice}`);
-    });
+    };
 
-    socket.on(WS_EVENTS.AUCTION_CANCELLED, () => {
+    const onAuctionCancelled = (data: { snapshot?: AuctionSnapshot }) => {
       notify('竞拍取消', '本场竞拍已被主播取消');
-      void loadSnapshot();
-    });
+      if (data.snapshot) {
+        setSnapshot(data.snapshot);
+      } else {
+        void loadSnapshot();
+      }
+      window.dispatchEvent(new CustomEvent('auction:cancelled'));
+    };
 
-    socket.on(WS_EVENTS.AUCTION_STARTED, (data: AuctionSnapshot) => {
-      setSnapshot(data);
-    });
+    const onAuctionStarted = (data: AuctionSnapshot) => setSnapshot(data);
+
+    if (socket.connected) {
+      joinAuction();
+    } else {
+      setConnectionStatus('connecting');
+      socket.once('connect', joinAuction);
+    }
+
+    socket.on('disconnect', onDisconnect);
+    socket.io.on('reconnect_attempt', onReconnectAttempt);
+    socket.io.on('reconnect', onReconnect);
+    socket.on(WS_EVENTS.SNAPSHOT, onSnapshot);
+    socket.on(WS_EVENTS.BID_UPDATE, onBidUpdate);
+    socket.on(WS_EVENTS.TIMER_SYNC, onTimerSync);
+    socket.on(WS_EVENTS.TIMER_EXTENDED, onTimerExtended);
+    socket.on(WS_EVENTS.OUTBID, onOutbid);
+    socket.on(WS_EVENTS.AUCTION_ENDED, onAuctionEnded);
+    socket.on(WS_EVENTS.AUCTION_CANCELLED, onAuctionCancelled);
+    socket.on(WS_EVENTS.AUCTION_STARTED, onAuctionStarted);
 
     if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
       void Notification.requestPermission();
     }
 
-    setConnectionStatus('connecting');
-
     return () => {
       cancelled = true;
-      socket.emit(WS_EVENTS.LEAVE_AUCTION, auctionId);
-      socket.disconnect();
+      socket.off('connect', joinAuction);
+      socket.off('disconnect', onDisconnect);
+      socket.io.off('reconnect_attempt', onReconnectAttempt);
+      socket.io.off('reconnect', onReconnect);
+      socket.off(WS_EVENTS.SNAPSHOT, onSnapshot);
+      socket.off(WS_EVENTS.BID_UPDATE, onBidUpdate);
+      socket.off(WS_EVENTS.TIMER_SYNC, onTimerSync);
+      socket.off(WS_EVENTS.TIMER_EXTENDED, onTimerExtended);
+      socket.off(WS_EVENTS.OUTBID, onOutbid);
+      socket.off(WS_EVENTS.AUCTION_ENDED, onAuctionEnded);
+      socket.off(WS_EVENTS.AUCTION_CANCELLED, onAuctionCancelled);
+      socket.off(WS_EVENTS.AUCTION_STARTED, onAuctionStarted);
+      releaseAuctionSocket(auctionId);
       socketRef.current = null;
     };
   }, [

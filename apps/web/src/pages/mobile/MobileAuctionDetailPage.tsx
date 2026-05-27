@@ -1,11 +1,25 @@
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Button, Card, List, Tag } from 'antd-mobile';
+import { Button, Card, List, NavBar, Tag } from 'antd-mobile';
 import { auctionsApi } from '../../lib/api';
 
 export default function MobileAuctionDetailPage() {
   const { auctionId } = useParams<{ auctionId: string }>();
+  const [searchParams] = useSearchParams();
+  const roomId = searchParams.get('roomId');
   const navigate = useNavigate();
+
+  const goBack = () => {
+    if (roomId) {
+      navigate(`/m/room/${roomId}`);
+      return;
+    }
+    if (window.history.length > 1) {
+      navigate(-1);
+      return;
+    }
+    navigate('/m');
+  };
   const { data, isLoading } = useQuery({
     queryKey: ['auction', auctionId],
     queryFn: () => auctionsApi.get(auctionId!),
@@ -18,8 +32,13 @@ export default function MobileAuctionDetailPage() {
   const rules = auction.rules as Record<string, unknown> | undefined;
   const lot = auction.lot as Record<string, unknown> | undefined;
 
+  const livePath = roomId
+    ? `/m/live/${auctionId}?roomId=${roomId}`
+    : `/m/live/${auctionId}`;
+
   return (
     <div>
+      <NavBar onBack={goBack}>{auction.title as string}</NavBar>
       <Card title={auction.title as string}>
         {typeof lot?.imageUrl === 'string' && lot.imageUrl && (
           <img
@@ -49,7 +68,7 @@ export default function MobileAuctionDetailPage() {
           color="primary"
           size="large"
           style={{ marginTop: 16 }}
-          onClick={() => navigate(`/m/live/${auctionId}`)}
+          onClick={() => navigate(livePath)}
         >
           进入直播间
         </Button>

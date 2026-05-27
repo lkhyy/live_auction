@@ -1,0 +1,23 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json* ./
+COPY packages/shared ./packages/shared
+COPY apps/web ./apps/web
+RUN npm ci 2>/dev/null || npm install
+RUN npm run build -w @live-auction/shared
+ARG VITE_API_URL=
+ARG VITE_WS_URL=
+ARG VITE_ADMIN_BASE=/admin/
+ARG VITE_APP_TARGET=admin
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_WS_URL=$VITE_WS_URL
+ENV VITE_ADMIN_BASE=$VITE_ADMIN_BASE
+ENV VITE_APP_TARGET=$VITE_APP_TARGET
+WORKDIR /app/apps/web
+RUN npx tsc -b && npx vite build --mode admin
+
+FROM nginx:alpine
+COPY --from=builder /app/apps/web/dist-admin /usr/share/nginx/html
+COPY docker/nginx-admin.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

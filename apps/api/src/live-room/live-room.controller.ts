@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser, type AuthUser } from '../auth/decorators/current-user.decorator';
@@ -17,14 +18,28 @@ export class LiveRoomController {
     return this.liveRooms.list();
   }
 
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Get('mine')
+  @Roles('HOST', 'ADMIN')
+  listMine(@CurrentUser() user: AuthUser) {
+    return this.liveRooms.listByHost(user.userId);
+  }
+
   @Get('live')
   listLive() {
     return this.liveRooms.listLive();
   }
 
+  @Get(':id')
+  getOne(@Param('id') id: string) {
+    return this.liveRooms.getById(id);
+  }
+
+  @UseGuards(OptionalJwtAuthGuard)
   @Get(':id/showcase')
-  showcase(@Param('id') id: string) {
-    return this.liveRooms.getShowcase(id);
+  showcase(@Param('id') id: string, @CurrentUser() user?: AuthUser) {
+    return this.liveRooms.getShowcase(id, user?.userId);
   }
 
   @ApiBearerAuth()
@@ -65,5 +80,25 @@ export class LiveRoomController {
     @Param('auctionId') auctionId: string,
   ) {
     return this.liveRooms.switchActiveAuction(user.userId, id, auctionId);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Post(':id/clear-active')
+  @Roles('HOST', 'ADMIN')
+  clearActive(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.liveRooms.clearActiveExplain(user.userId, id);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Delete(':id/auctions/:auctionId')
+  @Roles('HOST', 'ADMIN')
+  detachAuction(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Param('auctionId') auctionId: string,
+  ) {
+    return this.liveRooms.detachAuction(user.userId, id, auctionId);
   }
 }

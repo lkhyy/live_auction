@@ -1,13 +1,29 @@
 import { useQuery } from '@tanstack/react-query';
 import { Card, Table, Tag, Button, Space } from 'antd';
 import { Link } from 'react-router-dom';
+import { userAppUrl } from '../../lib/appConfig';
 import { auctionsApi } from '../../lib/api';
+import AdminLoadError from '../../components/AdminLoadError';
+import { useAdminApiReady } from '../../hooks/useAdminApiReady';
+
+const STATUS_LABEL: Record<string, string> = {
+  LIVE: '竞拍中',
+  DRAFT: '草稿',
+  SCHEDULED: '待开拍',
+  SETTLED: '已结束',
+  CANCELLED: '已取消',
+  CLOSING: '截拍中',
+  FAILED: '流拍',
+};
 
 export default function AdminDashboardPage() {
-  const { data, isLoading } = useQuery({
+  const apiReady = useAdminApiReady();
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['dashboard'],
     queryFn: () => auctionsApi.dashboard(),
-    refetchInterval: 5000,
+    enabled: apiReady,
+    refetchInterval: apiReady ? 5000 : false,
+    retry: 1,
   });
 
   const columns = [
@@ -26,10 +42,12 @@ export default function AdminDashboardPage() {
         const color: Record<string, string> = {
           LIVE: 'red',
           DRAFT: 'default',
+          SCHEDULED: 'blue',
           SETTLED: 'green',
           CANCELLED: 'orange',
+          FAILED: 'default',
         };
-        return <Tag color={color[s]}>{s}</Tag>;
+        return <Tag color={color[s]}>{STATUS_LABEL[s] ?? s}</Tag>;
       },
     },
     {
@@ -50,7 +68,12 @@ export default function AdminDashboardPage() {
       key: 'order',
       render: (_: unknown, r: Record<string, unknown>) => {
         const o = r.order as Record<string, unknown> | null;
-        return o ? <Tag>{o.status as string}</Tag> : '-';
+        if (!o) return '-';
+        return (
+          <Link to={`/orders?id=${o.id as string}`}>
+            <Tag>{o.status as string}</Tag>
+          </Link>
+        );
       },
     },
     {
@@ -58,17 +81,17 @@ export default function AdminDashboardPage() {
       key: 'action',
       render: (_: unknown, r: Record<string, unknown>) => (
         <Space>
-          {r.status === 'LIVE' && (
-            <Link to={`/m/live/${r.id as string}`}>
-              <Button size="small" type="primary">
-                直播间
-              </Button>
+          {r.roomId != null && (
+            <Link to="/">
+              <Button size="small">控制台</Button>
             </Link>
           )}
-          {r.status === 'DRAFT' && (
-            <Link to="/admin/auctions">
-              <Button size="small">管理</Button>
-            </Link>
+          {r.status === 'LIVE' && (
+            <a href={`${userAppUrl()}/m/room/${r.roomId as string}`} target="_blank" rel="noreferrer">
+              <Button size="small" type="primary">
+                用户端预览
+              </Button>
+            </a>
           )}
         </Space>
       ),
@@ -77,6 +100,7 @@ export default function AdminDashboardPage() {
 
   return (
     <Card title="竞拍看板">
+      <AdminLoadError error={isError ? (error as Error) : null} title="竞拍看板加载失败" />
       <Table
         loading={isLoading}
         dataSource={(data as Record<string, unknown>[]) ?? []}

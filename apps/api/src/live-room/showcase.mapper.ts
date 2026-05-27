@@ -1,20 +1,38 @@
 import type { Auction, Lot } from '@prisma/client';
 import type { ShowcaseDisplayStatus, ShowcaseItem } from '@live-auction/shared';
 
-type AuctionWithLot = Auction & { lot: Lot; _count?: { bids: number } };
+type AuctionWithLot = Auction & {
+  lot: Lot;
+  order?: { id: string } | null;
+  _count?: { bids: number };
+};
 
 interface RuleSnapshot {
   startPrice?: number;
   minIncrement?: number;
+  capPrice?: number;
+  reservePrice?: number;
 }
 
 export function mapToShowcaseItem(
   auction: AuctionWithLot,
   activeAuctionId: string | null,
   redis?: { currentPrice?: number; endAt?: number; bidCount?: number },
+  options?: { includeReserve?: boolean; priceAlertActive?: boolean },
 ): ShowcaseItem {
   const rules = auction.ruleSnapshot as RuleSnapshot;
   const startPrice = Number(rules.startPrice ?? 0);
+  const minIncrement = Number(rules.minIncrement ?? 1);
+  const reservePrice =
+    options?.includeReserve && rules.reservePrice != null
+      ? Number(rules.reservePrice)
+      : undefined;
+  const capPrice =
+    auction.capPrice != null
+      ? Number(auction.capPrice)
+      : rules.capPrice != null
+        ? Number(rules.capPrice)
+        : null;
   const dbPrice = Number(auction.currentPrice);
   const currentPrice = redis?.currentPrice ?? dbPrice;
   const bidCount = redis?.bidCount ?? auction._count?.bids ?? 0;
@@ -27,8 +45,12 @@ export function mapToShowcaseItem(
     title: auction.title,
     imageUrl: auction.lot.imageUrl,
     startPrice,
+    minIncrement,
+    capPrice,
+    reservePrice,
     isExplaining,
     bidCount,
+    priceAlertActive: options?.priceAlertActive ?? false,
   };
 
   switch (auction.status) {
@@ -79,12 +101,13 @@ export function mapToShowcaseItem(
         return {
           ...base,
           displayStatus: 'SOLD',
-          statusLabel: '竞拍结束',
-          priceLabel: '落槌价',
+          statusLabel: '已成交',
+          priceLabel: '成交金额',
           price: currentPrice,
           buttonText: '已结束',
           buttonEnabled: false,
           buttonAction: 'NONE',
+          orderId: auction.order?.id ?? null,
         };
       }
       return {
@@ -98,6 +121,16 @@ export function mapToShowcaseItem(
         buttonAction: 'NONE',
       };
     case 'CANCELLED':
+      return {
+        ...base,
+        displayStatus: 'CANCELLED',
+        statusLabel: '已取消',
+        priceLabel: hasBids ? '取消前价格' : '起拍价',
+        price: hasBids ? currentPrice : startPrice,
+        buttonText: '已取消',
+        buttonEnabled: false,
+        buttonAction: 'NONE',
+      };
     case 'FAILED':
     default:
       return {

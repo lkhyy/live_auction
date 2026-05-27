@@ -1,4 +1,5 @@
 import type { ShowcaseItem } from '@live-auction/shared';
+import { useShowcaseCountdownLabel } from '../../hooks/useShowcaseCountdownLabel';
 
 const STATUS_COLORS: Record<string, { bg: string; color: string }> = {
   BIDDING: { bg: '#fff1f0', color: '#cf1322' },
@@ -14,6 +15,7 @@ interface Props {
 }
 
 export default function ShowcaseItemCard({ item, onAction }: Props) {
+  const statusLabel = useShowcaseCountdownLabel(item);
   const tag = STATUS_COLORS[item.displayStatus] ?? STATUS_COLORS.FAILED;
   const btnStyle: React.CSSProperties =
     item.buttonAction === 'BID'
@@ -122,7 +124,7 @@ export default function ShowcaseItemCard({ item, onAction }: Props) {
               color: tag.color,
             }}
           >
-            {item.statusLabel}
+            {statusLabel}
           </span>
         </div>
         <div style={{ marginTop: 'auto', paddingTop: 8 }}>

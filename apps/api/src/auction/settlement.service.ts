@@ -1,6 +1,10 @@
-import { Inject, Injectable, forwardRef } from '@nestjs/common';
+import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { AuctionStatus, AuctionEventType } from '@prisma/client';
-import { type AuctionSnapshot, type SettleReason } from '@live-auction/shared';
+import {
+  type AuctionSnapshot,
+  type AuctionRuleSnapshot,
+  type SettleReason,
+} from '@live-auction/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
@@ -9,6 +13,8 @@ import { LiveRoomService } from '../live-room/live-room.service';
 
 @Injectable()
 export class SettlementService {
+  private readonly logger = new Logger(SettlementService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
@@ -27,7 +33,9 @@ export class SettlementService {
     if (!auction) throw new Error('Auction not found');
 
     const state = await this.redis.getState(auctionId);
-    const leaderboard = await this.redis.getLeaderboard(auctionId);
+    const leaderboard = await this.enrichLeaderboard(
+      await this.redis.getLeaderboard(auctionId),
+    );
     const rules = auction.ruleSnapshot as {
       minIncrement: number;
       capPrice?: number;
@@ -72,13 +80,34 @@ export class SettlementService {
     winnerId: string | null,
     finalPrice: number,
   ) {
+    const auctionRow = await this.prisma.auction.findUnique({
+      where: { id: auctionId },
+      select: { ruleSnapshot: true },
+    });
+    const rules = (auctionRow?.ruleSnapshot ?? {}) as AuctionRuleSnapshot;
+    const reserve = rules.reservePrice;
+
+    let effectiveWinnerId = winnerId;
+    let effectiveReason = reason;
+    if (
+      effectiveWinnerId &&
+      reserve != null &&
+      reserve > 0 &&
+      finalPrice < reserve
+    ) {
+      effectiveWinnerId = null;
+      effectiveReason = 'RESERVE_NOT_MET';
+    }
+
+    effectiveWinnerId = await this.resolveWinnerId(effectiveWinnerId);
+
     const updated = await this.prisma.auction.update({
       where: { id: auctionId },
       data: {
         status: AuctionStatus.SETTLED,
-        winnerId: winnerId || null,
+        winnerId: effectiveWinnerId || null,
         currentPrice: finalPrice,
-        settleReason: reason,
+        settleReason: effectiveReason,
         endAt: new Date(),
       },
     });
@@ -88,22 +117,27 @@ export class SettlementService {
       data: {
         auctionId,
         type:
-          reason === 'CAP_PRICE'
+          effectiveReason === 'CAP_PRICE'
             ? AuctionEventType.CAP_REACHED
             : AuctionEventType.SETTLED,
-        payload: { reason, winnerId, finalPrice },
+        payload: {
+          reason: effectiveReason,
+          winnerId: effectiveWinnerId,
+          finalPrice,
+          reservePrice: reserve ?? null,
+        },
       },
     });
 
-    if (winnerId && finalPrice > 0) {
-      await this.orders.createFromAuction(auctionId, winnerId, finalPrice);
+    if (effectiveWinnerId && finalPrice > 0) {
+      await this.orders.createFromAuction(auctionId, effectiveWinnerId, finalPrice);
     }
 
     const snapshot = await this.buildSnapshot(auctionId);
     this.realtime.stopTimerSync(auctionId);
     this.realtime.broadcastAuctionEnded(auctionId, {
-      reason,
-      winnerId,
+      reason: effectiveReason,
+      winnerId: effectiveWinnerId,
       finalPrice,
       snapshot,
     });
@@ -117,32 +151,74 @@ export class SettlementService {
     return updated;
   }
 
+  /** 丢弃 Redis 中已不存在用户的排名，并用 DB 昵称覆盖 ZSet 成员名 */
+  private async enrichLeaderboard(
+    entries: Array<{ userId: string; displayName: string; amount: number; rank: number }>,
+  ) {
+    if (entries.length === 0) return entries;
+    const ids = [...new Set(entries.map((e) => e.userId))];
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, displayName: true },
+    });
+    const nameById = new Map(users.map((u) => [u.id, u.displayName]));
+    return entries
+      .filter((e) => nameById.has(e.userId))
+      .map((e, idx) => ({
+        userId: e.userId,
+        displayName: nameById.get(e.userId)!,
+        amount: e.amount,
+        rank: idx + 1,
+      }));
+  }
+
+  /** Redis leaderId 可能在仅重跑 MySQL seed 后与 users 表不一致 */
+  private async resolveWinnerId(winnerId: string | null): Promise<string | null> {
+    if (!winnerId) return null;
+    const user = await this.prisma.user.findUnique({
+      where: { id: winnerId },
+      select: { id: true },
+    });
+    if (!user) {
+      this.logger.warn(`settle: winner ${winnerId} not in DB, settling without winner`);
+      return null;
+    }
+    return winnerId;
+  }
+
   async checkExpiredAuctions() {
     const live = await this.prisma.auction.findMany({
       where: { status: AuctionStatus.LIVE },
     });
     const now = Date.now();
     for (const a of live) {
-      const state = await this.redis.getState(a.id);
-      const endAt = Number(state.endAt ?? a.endAt?.getTime() ?? 0);
-      const redisStatus = state.status;
-      if (redisStatus === 'SETTLED') {
-        const leaderId = state.leaderId || null;
-        const price = Number(state.currentPrice ?? 0);
-        if (a.status === AuctionStatus.LIVE) {
-          await this.settle(
-            a.id,
-            state.settleReason === 'CAP_PRICE' ? 'CAP_PRICE' : 'TIME_UP',
-            leaderId || null,
-            price,
-          );
+      try {
+        const state = await this.redis.getState(a.id);
+        const endAt = Number(state.endAt ?? a.endAt?.getTime() ?? 0);
+        const redisStatus = state.status;
+        if (redisStatus === 'SETTLED') {
+          const leaderId = state.leaderId || null;
+          const price = Number(state.currentPrice ?? 0);
+          if (a.status === AuctionStatus.LIVE) {
+            await this.settle(
+              a.id,
+              state.settleReason === 'CAP_PRICE' ? 'CAP_PRICE' : 'TIME_UP',
+              leaderId || null,
+              price,
+            );
+          }
+          continue;
         }
-        continue;
-      }
-      if (endAt > 0 && now >= endAt) {
-        const leaderId = state.leaderId || null;
-        const price = Number(state.currentPrice ?? 0);
-        await this.settle(a.id, 'TIME_UP', leaderId || null, price);
+        if (endAt > 0 && now >= endAt) {
+          const leaderId = state.leaderId || null;
+          const price = Number(state.currentPrice ?? 0);
+          await this.settle(a.id, 'TIME_UP', leaderId || null, price);
+        }
+      } catch (err) {
+        this.logger.error(
+          { auctionId: a.id, err },
+          'checkExpiredAuctions failed for auction',
+        );
       }
     }
   }

@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@ne
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { AuctionStatus } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser, type AuthUser } from '../auth/decorators/current-user.decorator';
@@ -32,14 +33,23 @@ export class AuctionController {
     return this.auction.dashboard(user.userId);
   }
 
+  @UseGuards(OptionalJwtAuthGuard)
   @Get(':id')
-  get(@Param('id') id: string) {
-    return this.auction.get(id);
+  get(@Param('id') id: string, @CurrentUser() user?: AuthUser) {
+    return this.auction.get(id, user);
   }
 
   @Get(':id/snapshot')
   snapshot(@Param('id') id: string) {
     return this.bidding.getSnapshot(id);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Get(':id/bids')
+  @Roles('HOST', 'ADMIN')
+  listBids(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.auction.listBids(user.userId, id);
   }
 
   @ApiBearerAuth()

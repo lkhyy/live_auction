@@ -5,6 +5,10 @@ COPY packages/shared ./packages/shared
 COPY apps/web ./apps/web
 RUN npm ci 2>/dev/null || npm install
 RUN npm run build -w @live-auction/shared
+ARG VITE_API_URL=
+ARG VITE_WS_URL=
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_WS_URL=$VITE_WS_URL
 RUN npm run build -w @live-auction/web
 
 FROM nginx:alpine

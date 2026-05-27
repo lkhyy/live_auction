@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { AuctionStatus, AuctionEventType } from '@prisma/client';
-import { auctionRuleSnapshotSchema, type AuctionRuleSnapshot } from '@live-auction/shared';
+import { auctionRuleSnapshotSchema, type AuctionRuleSnapshot, stripReservePrice, DEFAULT_ANOMALY_DETECTION } from '@live-auction/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { SettlementService } from './settlement.service';
@@ -53,8 +53,11 @@ export class AuctionService {
   async update(hostId: string, auctionId: string, dto: UpdateAuctionDto) {
     const auction = await this.get(auctionId);
     if (auction.hostId !== hostId) throw new ForbiddenException();
-    if (auction.status !== AuctionStatus.DRAFT) {
-      throw new BadRequestException('Only DRAFT auctions can be updated');
+    if (
+      auction.status !== AuctionStatus.DRAFT &&
+      auction.status !== AuctionStatus.SCHEDULED
+    ) {
+      throw new BadRequestException('Only DRAFT or SCHEDULED auctions can be updated');
     }
     const data: {
       title?: string;
@@ -64,14 +67,48 @@ export class AuctionService {
     } = {};
     if (dto.title) data.title = dto.title;
     if (dto.rules) {
-      const rules = auctionRuleSnapshotSchema.parse({
-        ...(auction.ruleSnapshot as object),
+      const prev = auction.ruleSnapshot as AuctionRuleSnapshot;
+      const merged = {
+        ...prev,
         ...dto.rules,
         softClose: {
-          ...(auction.ruleSnapshot as AuctionRuleSnapshot).softClose,
+          ...prev.softClose,
           ...dto.rules.softClose,
         },
-      });
+        anomalyDetection: dto.rules.anomalyDetection
+          ? {
+              ...DEFAULT_ANOMALY_DETECTION,
+              ...prev.anomalyDetection,
+              ...dto.rules.anomalyDetection,
+              range: {
+                ...DEFAULT_ANOMALY_DETECTION.range,
+                ...prev.anomalyDetection?.range,
+                ...dto.rules.anomalyDetection.range,
+              },
+              increment: {
+                ...DEFAULT_ANOMALY_DETECTION.increment,
+                ...prev.anomalyDetection?.increment,
+                ...dto.rules.anomalyDetection.increment,
+              },
+              timing: {
+                ...DEFAULT_ANOMALY_DETECTION.timing,
+                ...prev.anomalyDetection?.timing,
+                ...dto.rules.anomalyDetection.timing,
+              },
+              collusion: {
+                ...DEFAULT_ANOMALY_DETECTION.collusion,
+                ...prev.anomalyDetection?.collusion,
+                ...dto.rules.anomalyDetection.collusion,
+              },
+              stats: {
+                ...DEFAULT_ANOMALY_DETECTION.stats,
+                ...prev.anomalyDetection?.stats,
+                ...dto.rules.anomalyDetection.stats,
+              },
+            }
+          : prev.anomalyDetection,
+      };
+      const rules = auctionRuleSnapshotSchema.parse(merged);
       data.ruleSnapshot = rules;
       data.capPrice = rules.capPrice ?? null;
       data.currentPrice = rules.startPrice;
@@ -118,7 +155,7 @@ export class AuctionService {
     });
   }
 
-  async get(id: string) {
+  async get(id: string, viewer?: { userId: string; role: string }) {
     const auction = await this.prisma.auction.findUnique({
       where: { id },
       include: {
@@ -132,8 +169,18 @@ export class AuctionService {
     if (!auction) throw new NotFoundException('Auction not found');
     const participantCount =
       auction.status === 'LIVE' ? await this.redis.getParticipantCount(id) : 0;
-    const rules = auction.ruleSnapshot as AuctionRuleSnapshot;
-    return { ...auction, participantCount, rules };
+    const rawRules = auction.ruleSnapshot as AuctionRuleSnapshot;
+    const isOwner =
+      viewer &&
+      (viewer.role === 'ADMIN' ||
+        (viewer.role === 'HOST' && auction.hostId === viewer.userId));
+    const rules = isOwner ? rawRules : stripReservePrice(rawRules);
+    return {
+      ...auction,
+      ruleSnapshot: rules,
+      participantCount,
+      rules,
+    };
   }
 
   async goLive(hostId: string, auctionId: string) {
@@ -188,26 +235,69 @@ export class AuctionService {
       throw new BadRequestException('Only live auctions can be cancelled');
     }
 
+    const rules = auction.ruleSnapshot as AuctionRuleSnapshot;
+    if (rules.allowHostCancel === false) {
+      throw new BadRequestException('Host cancel is disabled for this auction');
+    }
+
+    const state = await this.redis.getState(auctionId);
+    const currentPrice = state.currentPrice
+      ? Number(state.currentPrice)
+      : Number(auction.currentPrice);
+    const leaderId = state.leaderId || null;
+
     await this.redis.setStatus(auctionId, 'CANCELLED');
     const updated = await this.prisma.auction.update({
       where: { id: auctionId },
-      data: { status: AuctionStatus.CANCELLED, settleReason: 'HOST_CANCEL' },
+      data: {
+        status: AuctionStatus.CANCELLED,
+        settleReason: 'HOST_CANCEL',
+        endAt: new Date(),
+        currentPrice,
+      },
     });
 
     await this.prisma.auctionEvent.create({
       data: {
         auctionId,
         type: AuctionEventType.CANCELLED,
-        payload: { reason },
+        payload: { reason, currentPrice, leaderId },
       },
     });
 
+    if (auction.roomId) {
+      const room = await this.prisma.liveRoom.findUnique({
+        where: { id: auction.roomId },
+        select: { activeAuctionId: true },
+      });
+      if (room?.activeAuctionId === auctionId) {
+        await this.prisma.liveRoom.update({
+          where: { id: auction.roomId },
+          data: { activeAuctionId: null },
+        });
+      }
+    }
+
     this.realtime.stopTimerSync(auctionId);
-    this.realtime.broadcastCancelled(auctionId, reason);
+    const snapshot = await this.settlement.buildSnapshot(auctionId);
+    this.realtime.broadcastCancelled(auctionId, reason, snapshot);
+    await this.liveRooms.broadcastShowcaseIfNeeded(auction.roomId);
+
     return updated;
   }
 
   getRules(auctionId: string): Promise<AuctionRuleSnapshot> {
     return this.get(auctionId).then((a) => a.ruleSnapshot as AuctionRuleSnapshot);
+  }
+
+  async listBids(hostId: string, auctionId: string) {
+    const auction = await this.get(auctionId);
+    if (auction.hostId !== hostId) throw new ForbiddenException();
+    return this.prisma.bid.findMany({
+      where: { auctionId },
+      orderBy: [{ amount: 'desc' }, { createdAt: 'desc' }],
+      include: { user: { select: { id: true, displayName: true } } },
+      take: 100,
+    });
   }
 }

@@ -13,6 +13,7 @@ export const WS_EVENTS = {
   JOIN_LIVE_ROOM: 'join_live_room',
   LEAVE_LIVE_ROOM: 'leave_live_room',
   SHOWCASE_UPDATED: 'showcase_updated',
+  PRICE_ALERT: 'price_alert',
 } as const;
 
 export const BID_QUEUE = 'bid-persist';

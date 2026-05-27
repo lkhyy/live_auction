@@ -38,6 +38,17 @@ export class LiveRoomService {
     });
   }
 
+  async listByHost(hostId: string) {
+    return this.prisma.liveRoom.findMany({
+      where: { hostId },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        host: { select: { displayName: true } },
+        _count: { select: { auctions: true } },
+      },
+    });
+  }
+
   async listLive() {
     return this.prisma.liveRoom.findMany({
       where: { status: LiveRoomStatus.LIVE },
@@ -46,13 +57,34 @@ export class LiveRoomService {
     });
   }
 
+  async getById(roomId: string) {
+    const room = await this.prisma.liveRoom.findUnique({
+      where: { id: roomId },
+      include: {
+        host: { select: { id: true, displayName: true } },
+        auctions: {
+          orderBy: { sortOrder: 'asc' },
+          select: {
+            id: true,
+            title: true,
+            status: true,
+            sortOrder: true,
+            currentPrice: true,
+          },
+        },
+      },
+    });
+    if (!room) throw new NotFoundException('Live room not found');
+    return room;
+  }
+
   async create(hostId: string, title: string) {
     return this.prisma.liveRoom.create({
       data: { hostId, title },
     });
   }
 
-  async getShowcase(roomId: string): Promise<LiveRoomShowcase> {
+  async getShowcase(roomId: string, viewerId?: string): Promise<LiveRoomShowcase> {
     const room = await this.prisma.liveRoom.findUnique({
       where: { id: roomId },
       include: {
@@ -61,6 +93,7 @@ export class LiveRoomService {
           orderBy: { sortOrder: 'asc' },
           include: {
             lot: true,
+            order: { select: { id: true } },
             _count: { select: { bids: true } },
           },
         },
@@ -68,6 +101,7 @@ export class LiveRoomService {
     });
     if (!room) throw new NotFoundException('Live room not found');
 
+    const includeReserve = viewerId === room.hostId;
     const participantCount = await this.redis.getParticipantCount(`room:${roomId}`);
 
     const items = await Promise.all(
@@ -82,7 +116,10 @@ export class LiveRoomService {
             bidCount,
           };
         }
-        return mapToShowcaseItem(auction, room.activeAuctionId, redis);
+        return mapToShowcaseItem(auction, room.activeAuctionId, redis, {
+          includeReserve,
+          priceAlertActive: await this.redis.isPriceAlertSent(auction.id),
+        });
       }),
     );
 
@@ -200,5 +237,47 @@ export class LiveRoomService {
     if (!roomId) return;
     const showcase = await this.getShowcase(roomId);
     this.realtime.broadcastShowcase(roomId, showcase);
+  }
+
+  async clearActiveExplain(hostId: string, roomId: string) {
+    await this.ensureHost(hostId, roomId);
+    await this.prisma.liveRoom.update({
+      where: { id: roomId },
+      data: { activeAuctionId: null },
+    });
+    const showcase = await this.getShowcase(roomId);
+    this.realtime.broadcastShowcase(roomId, showcase);
+    return showcase;
+  }
+
+  async detachAuction(hostId: string, roomId: string, auctionId: string) {
+    const room = await this.ensureHost(hostId, roomId);
+    const auction = await this.prisma.auction.findFirst({
+      where: { id: auctionId, roomId },
+    });
+    if (!auction) throw new NotFoundException('Auction not in this room');
+    if (
+      auction.status !== AuctionStatus.DRAFT &&
+      auction.status !== AuctionStatus.SCHEDULED
+    ) {
+      throw new BadRequestException('Only upcoming auctions can be removed from room');
+    }
+    if (room.activeAuctionId === auctionId) {
+      await this.prisma.liveRoom.update({
+        where: { id: roomId },
+        data: { activeAuctionId: null },
+      });
+    }
+    await this.prisma.auction.update({
+      where: { id: auctionId },
+      data: {
+        roomId: null,
+        sortOrder: 0,
+        status: AuctionStatus.DRAFT,
+      },
+    });
+    const showcase = await this.getShowcase(roomId);
+    this.realtime.broadcastShowcase(roomId, showcase);
+    return showcase;
   }
 }

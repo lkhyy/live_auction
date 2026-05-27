@@ -1,10 +1,10 @@
-import { IsNumber, IsOptional, IsPositive, IsInt, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsInt, Min } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class PlaceBidDto {
-  @ApiProperty()
+  @ApiProperty({ description: '出价金额，0 元起拍时首笔可为 0' })
   @IsNumber()
-  @IsPositive()
+  @Min(0)
   amount!: number;
 
   @ApiPropertyOptional()

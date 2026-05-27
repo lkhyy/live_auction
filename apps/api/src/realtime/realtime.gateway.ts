@@ -11,8 +11,11 @@ import { ConfigService } from '@nestjs/config';
 import { Server, Socket } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { WS_EVENTS, type AuctionSnapshot, type LiveRoomShowcase } from '@live-auction/shared';
+import type { JoinAuctionPayload, JoinLiveRoomPayload } from '@live-auction/shared';
+import { resolveViewerKey } from '@live-auction/shared';
 import { RedisService } from '../redis/redis.service';
 import { SettlementService } from '../auction/settlement.service';
+import { LiveRoomService } from '../live-room/live-room.service';
 
 @WebSocketGateway({
   cors: { origin: true, credentials: true },
@@ -35,6 +38,8 @@ export class RealtimeGateway
     private readonly redis: RedisService,
     @Inject(forwardRef(() => SettlementService))
     private readonly settlement: SettlementService,
+    @Inject(forwardRef(() => LiveRoomService))
+    private readonly liveRooms: LiveRoomService,
     private readonly config: ConfigService,
   ) {}
 
@@ -61,23 +66,67 @@ export class RealtimeGateway
     if (roomId) {
       void this.redis.removeViewer(`room:${roomId}`, client.id);
       this.clientLiveRooms.delete(client.id);
+      void this.broadcastRoomShowcase(roomId);
     }
     this.logger.debug(`Client disconnected: ${client.id}`);
   }
 
+  private parseLiveRoomJoin(
+    client: Socket,
+    payload: string | JoinLiveRoomPayload,
+  ): { roomId: string; viewerKey: string } {
+    const roomId = typeof payload === 'string' ? payload : payload.roomId;
+    const viewerKey =
+      typeof payload === 'string'
+        ? resolveViewerKey(undefined, client.id)
+        : (payload.viewerKey ?? resolveViewerKey(undefined, client.id));
+    return { roomId, viewerKey };
+  }
+
+  private parseAuctionJoin(
+    client: Socket,
+    payload: string | JoinAuctionPayload,
+  ): { auctionId: string; viewerKey: string } {
+    const auctionId = typeof payload === 'string' ? payload : payload.auctionId;
+    const viewerKey =
+      typeof payload === 'string'
+        ? resolveViewerKey(undefined, client.id)
+        : (payload.viewerKey ?? resolveViewerKey(undefined, client.id));
+    return { auctionId, viewerKey };
+  }
+
+  private async broadcastRoomShowcase(roomId: string) {
+    try {
+      const showcase = await this.liveRooms.getShowcase(roomId);
+      this.broadcastShowcase(roomId, showcase);
+    } catch (err) {
+      this.logger.warn(`broadcastRoomShowcase failed for ${roomId}`, err);
+    }
+  }
+
   @SubscribeMessage(WS_EVENTS.JOIN_LIVE_ROOM)
-  async handleJoinLiveRoom(client: Socket, roomId: string) {
+  async handleJoinLiveRoom(client: Socket, payload: string | JoinLiveRoomPayload) {
+    const { roomId, viewerKey } = this.parseLiveRoomJoin(client, payload);
+    const prev = this.clientLiveRooms.get(client.id);
+    if (prev && prev !== roomId) {
+      await this.redis.removeViewer(`room:${prev}`, client.id);
+      void client.leave(this.liveRoomChannel(prev));
+      await this.broadcastRoomShowcase(prev);
+    }
     await client.join(this.liveRoomChannel(roomId));
-    await this.redis.addViewer(`room:${roomId}`, client.id);
+    await this.redis.addViewer(`room:${roomId}`, client.id, viewerKey);
     this.clientLiveRooms.set(client.id, roomId);
+    await this.broadcastRoomShowcase(roomId);
     return { joined: roomId };
   }
 
   @SubscribeMessage(WS_EVENTS.LEAVE_LIVE_ROOM)
-  async handleLeaveLiveRoom(client: Socket, roomId: string) {
+  async handleLeaveLiveRoom(client: Socket, payload: string | JoinLiveRoomPayload) {
+    const roomId = typeof payload === 'string' ? payload : payload.roomId;
     void client.leave(this.liveRoomChannel(roomId));
     await this.redis.removeViewer(`room:${roomId}`, client.id);
     this.clientLiveRooms.delete(client.id);
+    await this.broadcastRoomShowcase(roomId);
     return { left: roomId };
   }
 
@@ -90,14 +139,15 @@ export class RealtimeGateway
   }
 
   @SubscribeMessage(WS_EVENTS.JOIN_AUCTION)
-  async handleJoin(client: Socket, auctionId: string) {
+  async handleJoin(client: Socket, payload: string | JoinAuctionPayload) {
+    const { auctionId, viewerKey } = this.parseAuctionJoin(client, payload);
     const prev = this.clientAuctions.get(client.id);
     if (prev && prev !== auctionId) {
       void this.redis.removeViewer(prev, client.id);
       void client.leave(this.room(prev));
     }
     await client.join(this.room(auctionId));
-    await this.redis.addViewer(auctionId, client.id);
+    await this.redis.addViewer(auctionId, client.id, viewerKey);
     this.clientAuctions.set(client.id, auctionId);
     const snapshot = await this.settlement.buildSnapshot(auctionId);
     client.emit(WS_EVENTS.SNAPSHOT, snapshot);
@@ -171,11 +221,29 @@ export class RealtimeGateway
     });
   }
 
-  broadcastCancelled(auctionId: string, reason: string) {
+  broadcastCancelled(auctionId: string, reason: string, snapshot?: AuctionSnapshot) {
     this.server.to(this.room(auctionId)).emit(WS_EVENTS.AUCTION_CANCELLED, {
       type: 'auction_cancelled',
       auctionId,
       reason,
+      snapshot,
+    });
+  }
+
+  broadcastPriceAlert(
+    roomId: string,
+    data: {
+      auctionId: string;
+      currentPrice: number;
+      threshold: number;
+      reason: string;
+      reasons?: string[];
+    },
+  ) {
+    this.server.to(this.liveRoomChannel(roomId)).emit(WS_EVENTS.PRICE_ALERT, {
+      type: 'price_alert',
+      roomId,
+      ...data,
     });
   }
 

@@ -1,5 +1,6 @@
 import { PrismaClient, UserRole, LotStatus, AuctionStatus, LiveRoomStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { createSeedRedis, seedAuctionRedis } from './seed-redis';
 
 const prisma = new PrismaClient();
 
@@ -16,6 +17,15 @@ const rules = {
     maxTotalExtensionSeconds: 600,
   },
   allowHostCancel: true,
+};
+
+/** 0 元起拍 + 最低成交价演示（A02） */
+const rulesZeroStart = {
+  ...rules,
+  startPrice: 0,
+  minIncrement: 100,
+  reservePrice: 500,
+  capPrice: 500000,
 };
 
 async function main() {
@@ -102,6 +112,7 @@ async function main() {
     currentPrice: number;
     winnerId?: string;
     active?: boolean;
+    ruleSnapshot?: typeof rules;
   }> = [
     {
       id: '00000000-0000-4000-8000-00000000A01',
@@ -109,7 +120,7 @@ async function main() {
       title: lots[1].title,
       sortOrder: 1,
       status: AuctionStatus.LIVE,
-      currentPrice: 120,
+      currentPrice: 100,
       active: true,
     },
     {
@@ -118,7 +129,8 @@ async function main() {
       title: lots[0].title,
       sortOrder: 2,
       status: AuctionStatus.SCHEDULED,
-      currentPrice: 100,
+      currentPrice: 0,
+      ruleSnapshot: rulesZeroStart,
     },
     {
       id: '00000000-0000-4000-8000-00000000A03',
@@ -142,8 +154,9 @@ async function main() {
       lotIdx: 4,
       title: lots[4].title,
       sortOrder: 5,
-      status: AuctionStatus.CLOSING,
+      status: AuctionStatus.SETTLED,
       currentPrice: 880,
+      winnerId: buyer.id,
     },
   ];
 
@@ -157,7 +170,7 @@ async function main() {
         currentPrice: a.currentPrice,
         winnerId: a.winnerId ?? null,
         title: a.title,
-        ruleSnapshot: rules,
+        ruleSnapshot: a.ruleSnapshot ?? rules,
       },
       create: {
         id: a.id,
@@ -167,8 +180,8 @@ async function main() {
         sortOrder: a.sortOrder,
         title: a.title,
         status: a.status,
-        ruleSnapshot: rules,
-        capPrice: 5000,
+        ruleSnapshot: a.ruleSnapshot ?? rules,
+        capPrice: (a.ruleSnapshot ?? rules).capPrice ?? 5000,
         currentPrice: a.currentPrice,
         winnerId: a.winnerId ?? null,
         startAt: a.status === AuctionStatus.LIVE ? new Date() : null,
@@ -185,8 +198,24 @@ async function main() {
     data: { activeAuctionId: '00000000-0000-4000-8000-00000000A01' },
   });
 
+  const liveAuctionId = '00000000-0000-4000-8000-00000000A01';
+  const redis = createSeedRedis();
+  if (redis) {
+    try {
+      await redis.ping();
+      const endAt = Date.now() + 600_000;
+      await seedAuctionRedis(redis, liveAuctionId, rules, endAt);
+      console.log('Redis: LIVE auction state seeded for', liveAuctionId);
+    } catch (e) {
+      console.warn('Redis seed skipped (is Redis running?):', (e as Error).message);
+    } finally {
+      redis.disconnect();
+    }
+  }
+
   console.log('Seed complete. Demo live room:', ROOM_ID);
-  console.log('Open H5: /m/room/' + ROOM_ID);
+  console.log('Admin: /admin/live-rooms');
+  console.log('H5:    /m/room/' + ROOM_ID);
 }
 
 main()

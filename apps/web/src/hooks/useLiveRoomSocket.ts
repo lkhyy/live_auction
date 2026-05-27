@@ -1,32 +1,44 @@
-import { useEffect } from 'react';
-import { io } from 'socket.io-client';
-import { WS_EVENTS, type LiveRoomShowcase } from '@live-auction/shared';
-
-const WS_URL = import.meta.env.VITE_WS_URL ?? 'http://localhost:3000';
+import { useEffect, useRef } from 'react';
+import { WS_EVENTS, resolveViewerKey, type LiveRoomShowcase } from '@live-auction/shared';
+import { acquireRoomSocket, releaseRoomSocket } from '../lib/realtimeSocket';
+import { useAuthStore } from '../stores/authStore';
 
 export function useLiveRoomSocket(
   roomId: string | undefined,
   onShowcase: (data: LiveRoomShowcase) => void,
 ) {
+  const userId = useAuthStore((s) => s.user?.id);
+  const onShowcaseRef = useRef(onShowcase);
+  onShowcaseRef.current = onShowcase;
+
   useEffect(() => {
     if (!roomId) return;
 
-    const socket = io(WS_URL, {
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-    });
+    const socket = acquireRoomSocket(roomId);
 
-    socket.on('connect', () => {
-      socket.emit(WS_EVENTS.JOIN_LIVE_ROOM, roomId);
-    });
+    const joinRoom = () => {
+      socket.emit(WS_EVENTS.JOIN_LIVE_ROOM, {
+        roomId,
+        viewerKey: resolveViewerKey(userId, socket.id),
+      });
+    };
 
-    socket.on(WS_EVENTS.SHOWCASE_UPDATED, (data: LiveRoomShowcase) => {
-      onShowcase(data);
-    });
+    const onShowcaseUpdate = (data: LiveRoomShowcase) => {
+      onShowcaseRef.current(data);
+    };
+
+    if (socket.connected) {
+      joinRoom();
+    } else {
+      socket.once('connect', joinRoom);
+    }
+
+    socket.on(WS_EVENTS.SHOWCASE_UPDATED, onShowcaseUpdate);
 
     return () => {
-      socket.emit(WS_EVENTS.LEAVE_LIVE_ROOM, roomId);
-      socket.disconnect();
+      socket.off(WS_EVENTS.SHOWCASE_UPDATED, onShowcaseUpdate);
+      socket.off('connect', joinRoom);
+      releaseRoomSocket(roomId);
     };
-  }, [roomId, onShowcase]);
+  }, [roomId, userId]);
 }

@@ -39,6 +39,17 @@ export interface AuctionCancelledPayload {
   type: 'auction_cancelled';
   auctionId: string;
   reason: string;
+  snapshot?: AuctionSnapshot;
+}
+
+export interface PriceAlertPayload {
+  type: 'price_alert';
+  auctionId: string;
+  roomId: string;
+  currentPrice: number;
+  threshold: number;
+  reason: string;
+  reasons?: string[];
 }
 
 export type WsBroadcastPayload =
@@ -46,4 +57,5 @@ export type WsBroadcastPayload =
   | BidUpdatePayload
   | AuctionEndedPayload
   | AuctionCancelledPayload
+  | PriceAlertPayload
   | AuctionSnapshot;

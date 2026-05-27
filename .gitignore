@@ -1,8 +1,12 @@
 node_modules/
 dist/
+apps/web/dist/
+apps/web/dist-admin/
+apps/api/dist/
 build/
 .env
 .env.local
+.env.admin
 *.log
 .DS_Store
 coverage/

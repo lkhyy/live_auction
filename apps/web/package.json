@@ -5,8 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "dev:fresh": "node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('node_modules/.vite',{recursive:true,force:true});\" && vite",
+    "dev:admin": "vite --mode admin",
+    "dev:admin:fresh": "node --input-type=module -e \"import fs from 'node:fs'; fs.rmSync('node_modules/.vite',{recursive:true,force:true});\" && vite --mode admin",
+    "build": "tsc -b && vite build && vite build --mode admin",
+    "preview": "vite preview",
+    "preview:admin": "vite preview --mode admin"
   },
   "dependencies": {
     "@live-auction/shared": "*",

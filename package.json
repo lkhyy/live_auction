@@ -9,12 +9,16 @@
     "dev": "npm run dev -w @live-auction/api & npm run dev -w @live-auction/web",
     "dev:api": "npm run dev -w @live-auction/api",
     "dev:web": "npm run dev -w @live-auction/web",
+    "dev:web:fresh": "npm run dev:fresh -w @live-auction/web",
+    "dev:admin": "npm run dev:admin -w @live-auction/web",
     "build": "npm run build -w @live-auction/shared && npm run build -w @live-auction/api && npm run build -w @live-auction/web",
     "test": "npm run test --workspaces --if-present",
     "lint": "eslint . --ext .ts,.tsx",
     "db:migrate": "npm run db:migrate -w @live-auction/api",
     "db:generate": "npm run db:generate -w @live-auction/api",
-    "storage:reset": "node scripts/reset-storage.mjs"
+    "storage:reset": "node scripts/reset-storage.mjs",
+    "ports:check": "node scripts/kill-project-ports.mjs",
+    "ports:kill": "node scripts/kill-project-ports.mjs --kill"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

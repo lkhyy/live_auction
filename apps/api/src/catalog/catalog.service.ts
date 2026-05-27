@@ -1,4 +1,8 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { LotStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateLotDto, UpdateLotDto } from './dto/lot.dto';
@@ -22,6 +26,9 @@ export class CatalogService {
 
   async update(hostId: string, lotId: string, dto: UpdateLotDto) {
     const lot = await this.findOwned(hostId, lotId);
+    if (lot.status !== LotStatus.DRAFT && lot.status !== LotStatus.ACTIVE) {
+      throw new ForbiddenException('Only DRAFT or ACTIVE lots can be updated');
+    }
     return this.prisma.lot.update({
       where: { id: lot.id },
       data: dto,

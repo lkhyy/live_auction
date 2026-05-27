@@ -11,7 +11,7 @@ import {
   message,
 } from 'antd';
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { userAppUrl } from '../../lib/appConfig';
 import { auctionsApi, lotsApi } from '../../lib/api';
 
 export default function AdminAuctionsPage() {
@@ -81,31 +81,46 @@ export default function AdminAuctionsPage() {
         renderItem={(item) => (
           <List.Item
             actions={[
-              item.status === 'DRAFT' && (
+              (item.status === 'DRAFT' || item.status === 'SCHEDULED') && (
                 <>
                   <Button
                     key="edit"
                     onClick={() => {
                       setEditingId(item.id as string);
                       const rules = item.ruleSnapshot as Record<string, unknown>;
+                      const softClose = (rules.softClose as Record<string, unknown>) ?? {};
                       editForm.setFieldsValue({
                         title: item.title,
-                        rules,
+                        rules: {
+                          ...rules,
+                          softClose,
+                        },
                       });
                       setEditOpen(true);
                     }}
                   >
                     改规则
                   </Button>
-                  <Button key="live" type="primary" onClick={() => goLiveMutation.mutate(item.id as string)}>
-                    开播
-                  </Button>
+                  {item.status === 'DRAFT' && (
+                    <Button
+                      key="live"
+                      type="primary"
+                      onClick={() => goLiveMutation.mutate(item.id as string)}
+                    >
+                      开播
+                    </Button>
+                  )}
                 </>
               ),
               item.status === 'LIVE' && (
-                <Link key="room" to={`/m/live/${item.id as string}`}>
-                  <Button>进入直播间</Button>
-                </Link>
+                <a
+                  key="room"
+                  href={`${userAppUrl()}/m/live/${item.id as string}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <Button>用户端预览</Button>
+                </a>
               ),
             ].filter(Boolean)}
           >
@@ -180,7 +195,7 @@ export default function AdminAuctionsPage() {
       </Modal>
 
       <Modal
-        title="修改场次规则（仅草稿）"
+        title="修改场次规则（草稿 / 待开拍）"
         open={editOpen}
         onCancel={() => setEditOpen(false)}
         onOk={() => editForm.submit()}
@@ -202,6 +217,15 @@ export default function AdminAuctionsPage() {
           </Form.Item>
           <Form.Item name={['rules', 'capPrice']} label="封顶价">
             <InputNumber min={1} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name={['rules', 'durationSeconds']} label="时长(秒)">
+            <InputNumber min={60} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name={['rules', 'softClose', 'extensionSeconds']} label="延时秒数">
+            <InputNumber min={5} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name={['rules', 'softClose', 'triggerWindowSeconds']} label="触发窗口(秒)">
+            <InputNumber min={5} max={120} style={{ width: '100%' }} />
           </Form.Item>
         </Form>
       </Modal>

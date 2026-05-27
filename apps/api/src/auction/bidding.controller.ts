@@ -4,6 +4,7 @@ import {
   Headers,
   Param,
   Post,
+  UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
@@ -31,9 +32,14 @@ export class BiddingController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     const dbUser = await this.prisma.user.findUnique({ where: { id: user.userId } });
+    if (!dbUser) {
+      throw new UnauthorizedException(
+        '登录已失效（用户不存在），请退出后重新登录',
+      );
+    }
     return this.bidding.placeBid(
       user.userId,
-      dbUser?.displayName ?? 'User',
+      dbUser.displayName,
       auctionId,
       dto,
       idempotencyKey,

@@ -10,14 +10,44 @@ export class RedisService {
 
   constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
 
+  private static readonly VIEWER_STALE_MS = 60_000;
+
   private keys(auctionId: string) {
     return {
       state: `auction:${auctionId}:state`,
       bids: `auction:${auctionId}:bids`,
       seq: `auction:${auctionId}:seq`,
       rateLimit: (userId: string) => `auction:${auctionId}:rl:${userId}`,
-      viewers: `auction:${auctionId}:viewers`,
+      viewerUsers: `auction:${auctionId}:viewerUsers`,
+      viewerSockets: `auction:${auctionId}:viewerSockets`,
     };
+  }
+
+  private parseViewerEntry(raw: string): { socketId: string; lastSeenMs: number } | null {
+    try {
+      const parsed = JSON.parse(raw) as { socketId: string; lastSeenMs: number };
+      if (typeof parsed.socketId === 'string' && typeof parsed.lastSeenMs === 'number') {
+        return parsed;
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+
+  private async pruneStaleViewers(scopeId: string): Promise<void> {
+    const k = this.keys(scopeId);
+    const all = await this.redis.hgetall(k.viewerUsers);
+    const cutoff = Date.now() - RedisService.VIEWER_STALE_MS;
+    for (const [viewerKey, raw] of Object.entries(all)) {
+      const entry = this.parseViewerEntry(raw);
+      if (!entry || entry.lastSeenMs < cutoff) {
+        await this.redis.hdel(k.viewerUsers, viewerKey);
+        if (entry?.socketId) {
+          await this.redis.hdel(k.viewerSockets, entry.socketId);
+        }
+      }
+    }
   }
 
   async loadScripts(): Promise<void> {
@@ -31,7 +61,7 @@ export class RedisService {
   ): Promise<void> {
     const k = this.keys(auctionId);
     const pipeline = this.redis.pipeline();
-    pipeline.del(k.state, k.bids, k.seq);
+    pipeline.del(k.state, k.bids, k.seq, this.bidLogKey(auctionId), this.anomalyCodesKey(auctionId));
     const startPrice = rules.startPrice ?? 0;
     pipeline.hset(k.state, {
       status: 'LIVE',
@@ -161,21 +191,136 @@ export class RedisService {
     await this.redis.hset(k, { status, ...extra });
   }
 
+  priceAlertKey(auctionId: string) {
+    return `auction:${auctionId}:priceAlertSent`;
+  }
+
+  bidLogKey(auctionId: string) {
+    return `auction:${auctionId}:bidLog`;
+  }
+
+  anomalyCodesKey(auctionId: string) {
+    return `auction:${auctionId}:anomalyCodes`;
+  }
+
+  async getBidCount(auctionId: string): Promise<number> {
+    return this.redis.zcard(this.keys(auctionId).bids);
+  }
+
+  async appendBidLog(
+    auctionId: string,
+    entry: {
+      userId: string;
+      amount: number;
+      prevPrice: number;
+      atMs: number;
+      endAtMs: number;
+    },
+  ): Promise<void> {
+    const key = this.bidLogKey(auctionId);
+    await this.redis.lpush(key, JSON.stringify(entry));
+    await this.redis.ltrim(key, 0, 99);
+  }
+
+  async getBidLog(auctionId: string, limit = 50): Promise<
+    Array<{
+      userId: string;
+      amount: number;
+      prevPrice: number;
+      atMs: number;
+      endAtMs: number;
+    }>
+  > {
+    const raw = await this.redis.lrange(this.bidLogKey(auctionId), 0, limit - 1);
+    return raw
+      .map((s) => JSON.parse(s) as {
+        userId: string;
+        amount: number;
+        prevPrice: number;
+        atMs: number;
+        endAtMs: number;
+      })
+      .reverse();
+  }
+
+  /** 返回本次新触发的异常 code（已触发过的不再返回） */
+  async markAnomalyCodes(auctionId: string, codes: string[]): Promise<string[]> {
+    if (codes.length === 0) return [];
+    const key = this.anomalyCodesKey(auctionId);
+    const added: string[] = [];
+    for (const code of codes) {
+      const n = await this.redis.sadd(key, code);
+      if (n === 1) added.push(code);
+    }
+    return added;
+  }
+
+  async isPriceAlertSent(auctionId: string): Promise<boolean> {
+    const flagged = (await this.redis.get(this.priceAlertKey(auctionId))) === '1';
+    if (flagged) return true;
+    return (await this.redis.scard(this.anomalyCodesKey(auctionId))) > 0;
+  }
+
+  async markPriceAlertSent(auctionId: string): Promise<void> {
+    await this.redis.set(this.priceAlertKey(auctionId), '1');
+  }
+
   async clearAuction(auctionId: string) {
     const k = this.keys(auctionId);
-    await this.redis.del(k.state, k.bids, k.seq, k.viewers);
+    await this.redis.del(
+      k.state,
+      k.bids,
+      k.seq,
+      k.viewerUsers,
+      k.viewerSockets,
+      this.bidLogKey(auctionId),
+      this.anomalyCodesKey(auctionId),
+      this.priceAlertKey(auctionId),
+      `auction:${auctionId}:viewers`,
+    );
   }
 
-  async addViewer(auctionId: string, clientId: string) {
-    await this.redis.sadd(this.keys(auctionId).viewers, clientId);
+  async addViewer(scopeId: string, socketId: string, viewerKey: string) {
+    await this.pruneStaleViewers(scopeId);
+    const k = this.keys(scopeId);
+    const now = Date.now();
+
+    const existingRaw = await this.redis.hget(k.viewerUsers, viewerKey);
+    if (existingRaw) {
+      const existing = this.parseViewerEntry(existingRaw);
+      if (existing && existing.socketId !== socketId) {
+        await this.redis.hdel(k.viewerSockets, existing.socketId);
+      }
+    }
+
+    await this.redis.hset(
+      k.viewerUsers,
+      viewerKey,
+      JSON.stringify({ socketId, lastSeenMs: now }),
+    );
+    await this.redis.hset(k.viewerSockets, socketId, viewerKey);
+    await this.redis.expire(k.viewerUsers, 120);
+    await this.redis.expire(k.viewerSockets, 120);
   }
 
-  async removeViewer(auctionId: string, clientId: string) {
-    await this.redis.srem(this.keys(auctionId).viewers, clientId);
+  async removeViewer(scopeId: string, socketId: string) {
+    const k = this.keys(scopeId);
+    const viewerKey = await this.redis.hget(k.viewerSockets, socketId);
+    if (!viewerKey) return;
+
+    const raw = await this.redis.hget(k.viewerUsers, viewerKey);
+    if (raw) {
+      const entry = this.parseViewerEntry(raw);
+      if (entry?.socketId === socketId) {
+        await this.redis.hdel(k.viewerUsers, viewerKey);
+      }
+    }
+    await this.redis.hdel(k.viewerSockets, socketId);
   }
 
-  async getParticipantCount(auctionId: string): Promise<number> {
-    return this.redis.scard(this.keys(auctionId).viewers);
+  async getParticipantCount(scopeId: string): Promise<number> {
+    await this.pruneStaleViewers(scopeId);
+    return this.redis.hlen(this.keys(scopeId).viewerUsers);
   }
 
   getClient(): Redis {

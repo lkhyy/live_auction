@@ -15,6 +15,28 @@ function showError(msg: string) {
   }
 }
 
+/** 计算下一口价：0 元起拍时首笔可为 0 */
+export function computeNextBidAmount(snapshot: {
+  startPrice: number;
+  minIncrement: number;
+  currentPrice: number;
+  leaderId?: string | null;
+  leaderboard?: unknown[] | null;
+}): number {
+  const startPrice = Number(snapshot.startPrice) || 0;
+  const minIncrement = Number(snapshot.minIncrement) || 1;
+  const currentPrice = Number(snapshot.currentPrice) || 0;
+  const hasBids =
+    (snapshot.leaderboard?.length ?? 0) > 0 ||
+    !!snapshot.leaderId ||
+    currentPrice > startPrice;
+
+  if (!hasBids) {
+    return startPrice;
+  }
+  return currentPrice + minIncrement;
+}
+
 export function useThrottledBid(auctionId: string) {
   const lastBidRef = useRef(0);
   const { snapshot, bidPending, setBidPending } = useAuctionRoomStore();
@@ -64,10 +86,11 @@ export function useThrottledBid(auctionId: string) {
 
   const bidNextIncrement = useCallback(() => {
     if (!snapshot) return;
-    const hasBids = (snapshot.leaderboard?.length ?? 0) > 0;
-    const next = !hasBids
-      ? snapshot.startPrice
-      : snapshot.currentPrice + snapshot.minIncrement;
+    const next = computeNextBidAmount(snapshot);
+    if (!Number.isFinite(next) || next < 0) {
+      showError('无法计算出价金额，请刷新后重试');
+      return;
+    }
     void placeBid(next);
   }, [snapshot, placeBid]);
 
